@@ -438,6 +438,19 @@ Heavily used in **4coder**'s `views` and `api implementations`.
 ### Implementation
 
 ```c
+typedef u32 Coroutine_State;
+enum{
+    CoroutineState_Dead,
+    CoroutineState_Active,
+    CoroutineState_Inactive,
+    CoroutineState_Waiting,
+};
+typedef u32 Coroutine_Type;
+enum{
+    CoroutineType_Uninitialized,
+    CoroutineType_Root,
+    CoroutineType_Sub,
+};
 struct Coroutine{
     Coroutine *next;
     Thread_Context *tctx;
@@ -452,29 +465,93 @@ struct Coroutine{
     Coroutine_Type type;
     void *user_data;
 };
+struct Coroutine_Group{
+    Arena arena;
+    System_Mutex lock;
+    System_Condition_Variable init_cv;
+    b32 did_init;
+    Coroutine *active;
+    Coroutine *unused;
+    Coroutine root;
+};
 ```
 
-### Working Set
 
-The `Working_Set` structure has the following pieces of data.
+The `Coroutine` struct seems to be a management struct for a system to orchestrate it's coroutine based operations. But above that is the `Coroutine_Group` struct which seems to track active and  unused coroutine structs and possibly even provides structs from it's allocator.
 
-- An **allocator** , `Arena`
+API:
+```c
+typedef void Coroutine_Function(struct Coroutine *head);
 
-- A **32bit id** referencing a buffer
+// ???
+coroutine__pass_control
+coroutine_main
+coroutine_sub_init
+// systems managing coroutines
+coroutine_system_init
+coroutine_system_alloc
+coroutine_system_free
+// coroutines self managmenet
+coroutine_create
+coroutine_run
+coroutine_yield
 
-- A **count** of the active files
+void coroutine__pass_control(Coroutine *me, Coroutine *other,
+                        Coroutine_State my_new_state, Coroutine_Pass_Control control)
+void coroutine_main(void *ptr)
+void coroutine_sub_init(Coroutine *co, Coroutine_Group *sys)
+void coroutine_system_init(Coroutine_Group *sys)
+Coroutine* coroutine_system_alloc(Coroutine_Group *sys)
+void coroutine_system_free(Coroutine_Group *sys, Coroutine *coroutine)
+Coroutine* coroutine_create(Coroutine_Group *coroutines, Coroutine_Function *func)
+Coroutine* coroutine_run(Coroutine_Group *sys, Coroutine *other, void *in, void *out)
+void coroutine_yield(Coroutine *me);
+```
 
-- ... some other stuff
 
-- A **Thread Handle** to invoke a thread when a file needs to be changed
+Things to look at are the usage of the members `Coroutine *yield_ctx`, `Coroutine_Function *func`, `struct Coroutine_Group *sys`  which I believe are used for the core features that the coroutines provide.
+In 4coder the Model holds the `Coroutine_Group` struct and the views that are created use it to create `Coroutine` structs that are managed in by the view in it's lifetime. 
 
-This struct is primaraly referenced in the **main application loop**, **file** oriented code, and **edit**, oriented code. However it is only referenced as member of the `Model` struct.
+Model holds Coroutines System
+View is created with a Coroutine
+Coroutine holds reference to model and holds reference  to the veiw
 
-It uses the idea of a **canon** which seems to originate for the `File Layer` code and refers to a type of **name** that is used to reference a file alongside other names such as, **unique_name** and **base_name**. The **canon** which is a string is used as a value to store in a **hash table** and is keyed by the **file**. The **file id** is also a `File Layer` code construct more specifically inside the  `Editing_File` struct.
 
-In `WinMain` the **messages**, **scratch**, **log**, and **keyboard** panels seen on 4coder startup start off being allocated using the `Working_Set`  function `working_set_allocate_file`   which takes a refrence to a `Model` member called **lifetime_allocator** and an `Editing_File` reference is returned.
 
+Then data handling members such as `void *user_data`, `void *in`, `void *out`  and their usage.
+> The callers of the coroutine API define their own structs and the usage code allocates structs and passes pointers to them. However the internal coroutine API just deals with them as opaque pointers when they are passed to `couroutine_run()` from the system's defined **co run** function. The caller of the coroutine also defines a **request handler**
+
+Then for coroutine management we'll look at **os layer** dependent members `Thread_Context *tctx`, `System_Thread thread`, `System_Condition_Variable cv`.
+> 
+
+
+Finally for coroutine management self management we'll look at `Coroutine_State state`, `Coroutine_Type type`.
+> 
 ### Usage
+
+```c	
+app_init()
+	coroutine_system_init()
+	
+view_init()
+	coroutine_create()
+		coroutine_system_alloc()
+			coroutine_sub_init()
+				system_thread_launch(coroutine_main, co)
+					coroutine_main() as theadproc
+	co_run()
+
+coroutine_run()
+	coroutine__pass_control()
+		system_condition_variable_signal()
+		system_condition_variable_wait();
+	coroutine_system_free()
+
+
+view_quit_ui()
+	co_single_abort()	
+		view_check_co_exited()
+```
 
 ```c
 // found in: 4ed_view.h
@@ -512,15 +589,106 @@ co_run(Thread_Context *tctx, Models *models, Coroutine *co, Co_In *in, Co_Out *o
     Coroutine *result = coroutine_run(&models->coroutines, co, in, out);
     for (;result != 0 && out->request != CoRequest_None;){
         result = co_handle_request(tctx, models, result, out);
-    //... omitted section
-    //...
+    }
+    return(result);
 }
 ```
+### Working Set
 
+The `Working_Set` structure has the following pieces of data.
+
+- An **allocator** , `Arena`
+
+- A **32bit id** referencing a buffer
+
+- A **count** of the active files
+
+- ... some other stuff
+
+- A **Thread Handle** to invoke a thread when a file needs to be changed
+
+This struct is primaraly referenced in the **main application loop**, **file** oriented code, and **edit**, oriented code. However it is only referenced as member of the `Model` struct.
+
+It uses the idea of a **canon** which seems to originate for the `File Layer` code and refers to a type of **name** that is used to reference a file alongside other names such as, **unique_name** and **base_name**. The **canon** which is a string is used as a value to store in a **hash table** and is keyed by the **file**. The **file id** is also a `File Layer` code construct more specifically inside the  `Editing_File` struct.
+
+In `WinMain` the **messages**, **scratch**, **log**, and **keyboard** panels seen on 4coder startup start off being allocated using the `Working_Set`  function `working_set_allocate_file`   which takes a refrence to a `Model` member called **lifetime_allocator** and an `Editing_File` reference is returned.
+
+
+
+
+# OS Synchronization Primitive Abstractions
+
+Linux layer clearly defines mutexes and conational variables but windows abstraction layer is missing things or is defined in a less straight forward way in `win32_4ed.cpp`. The windows naming convention seems to be `<function name>_sig` like in the example `system_condition_variable_make_sig`.
+
+Usage code like functions defined in `4ed_coroutines.c` all call the variant with just the function name and not use the `_sig` sufix. Yet the coroutines are used in by the view system of 4coder which is clearly running on windows so how is the compiler finding the correct platform implementation.
+
+```c
+#define system_condition_variable_make_sig() System_Condition_Variable system_condition_variable_make(void)
+```
+The line above seem to be targeted at platform implementations. The windows platform layer uses the functions signatures that use the `<function name>_sig`  naming conventions but these are actually macros that are generated and found in `system_api.h`. The preprocessor then replaces the macro identifier with the actual function name which does not use the `_sig` suffix. The linux implementation does not use these macros and that is why the jumping from callsite to the implementation site in an editor will just take you to the linux implementation. 
+However when considering the coroutine implementation and the synchronizations api implemented by the windows layer the funtion names are actually the same only that the true function name is masked by those generated macros in the windows implementation.
+
+
+```c
+//win32_4ed.cpp
+internal
+system_mutex_make_sig(){
+  Win32_Object *object = win32_alloc_object(Win32ObjectKind_Mutex);
+  InitializeCriticalSection(&object->mutex);
+  return(handle_type(object));
+}
+
+internal
+system_mutex_acquire_sig(){
+  Win32_Object *object = (Win32_Object*)handle_type_ptr(mutex);
+  if (object->kind == Win32ObjectKind_Mutex){
+    EnterCriticalSection(&object->mutex);
+  }
+}
+
+internal
+system_mutex_release_sig(){
+  Win32_Object *object = (Win32_Object*)handle_type_ptr(mutex);
+  if (object->kind == Win32ObjectKind_Mutex){
+    LeaveCriticalSection(&object->mutex);
+  }
+}
+
+global i32 global_frame_mutex_state_ticker = 0;
+
+```
+
+### Abstractions over all windows primitive types
+
+`Win32_Object` is a discriminated union that has all the primitive that one would need from the platform layer with an enum to id the kind of primitive.
+
+
+```c
+struct Win32_Object{
+  Node node;
+  Win32_Object_Kind kind;
+  union{
+    struct{
+      UINT_PTR id;
+    } timer;
+    struct{
+      HANDLE thread;
+      Thread_Function *proc;
+      void *ptr;
+    } thread;
+    CRITICAL_SECTION mutex;
+    CONDITION_VARIABLE cv;
+  };
+};
+```
+
+
+### Threads
+The threads in the windows implementation have a wrapper that implements the thread proc defined by windows. The opaque pointer that is an arg to the thread proc takes a `Win32_Object` which is the discriminated union that has a **functions pointer**, **pointer to parameters** as `Thread_Function` and `void *` respectively.
+Then the tread execution kicks of by setting a **mutex**, waking a **control variable** which are managed by a struct called **win32_vars**.
 # Language Support Systems
 
 ## Generated Files
-
 The generated files has several of arrays that serve as hash tables. It pre inserts various language constructs into their respective hash tables. The c source is then generated from those hash tables so they are ready when needed by 4coder.     
 
 ```mermaid
@@ -560,7 +728,7 @@ graph TB
 
 # Memory
 
-The arena is comprised of a `Base_Allocator` which just has function pointers for platform specific reserve, commit, free, access, uncommit functions. It also has a `Cursor` object which is what tracks the base, position, and capacity of the arena. The `Cursor` object is also typically acessed via a `Cursor_Node` object which makes a linked list of cursors allowing different the arena to track several points of allocations.
+The arena is comprised of a `Base_Allocator` which just has function pointers for platform specific reserve, commit, free, access, uncommit functions. It also has a `Cursor` object which is what tracks the base, position, and capacity of the arena. The `Cursor` object is also typically accessed via a `Cursor_Node` object which makes a linked list of cursors allowing different the arena to track several points of allocations.
 
 ```mermaid
 graph TB

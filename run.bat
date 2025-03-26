@@ -1,7 +1,7 @@
 @echo off
 
 rem  **************************************************
-ren  INFORMATION
+rem  INFORMATION
 rem  **************************************************
 rem  This is for launching 4coder after a build.
 rem  The runnable 4ed.exe is in the 4cc\code\current_dist_super_x64\4coder\
